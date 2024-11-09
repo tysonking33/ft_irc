@@ -1,245 +1,283 @@
-#include <iostream>
-#include <cstring>
-#include <vector>
-#include <sys/types.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <unistd.h>
-#include <fcntl.h>
-#include <arpa/inet.h>
-#include <algorithm>
-#include <thread>
-#include <chrono>
-#include <mutex>
-#include <sstream>
-#include <string>
+#include <iostream>     // for cout/cerr
+#include <arpa/inet.h>  // for ip inet_pton()
+#include <netinet/in.h> // for address
+#include <sys/select.h> // for io multiplexing (select)
+#include <sys/socket.h> // for socket
+#include <unistd.h>     // for close()
+#include <vector>       // for storing client
+#include <string.h>
 
-#define PORT 8081
-#define MAX_CLIENTS 10
-#define BUFFER_SIZE 1024
+/*
+ consider adding thread if handling multiple client
+ simultaneously  for sending and reciving data at the same time
 
-std::vector<int> client_sockets; // Shared list of client sockets
-std::mutex clients_mutex;        // Mutex for synchronizing access to client_sockets
+/*
+ structure to encapsulate data of client this make easy to
+ passing the argument to new thread;
+*/
 
-// Function to set the socket to non-blocking mode
-int setNonBlocking(int sockfd)
+
+struct singleClient;
+
+struct Group{
+    std::string groupName;
+    std::vector<singleClient> membersList;
+    Group(void)
+    {
+        groupName = "defaultGroupName";
+    }
+};
+
+struct singleClient
 {
-    int flags = fcntl(sockfd, F_GETFL, 0);
-    if (flags == -1)
+    int clientId;
+    int32_t clientfd;            // client file descriptor
+    std::string username;
+    std::string password;
+    bool log_in_status;
+    std::vector<struct Group> chatgroupList;
+    singleClient(void)
     {
-        perror("fcntl");
-        return -1;
+        clientId = -1;
+        clientfd = -1;
+        username = "defaultUsername";
+        password = "defaultPassword";
+        log_in_status = false;
     }
-    return fcntl(sockfd, F_SETFL, flags | O_NONBLOCK);
-}
+};
 
-// Function to print the current status of the server
-void printServerStatus()
+struct clientDetails
 {
-    std::lock_guard<std::mutex> lock(clients_mutex); // Lock for thread safety
-    std::cout << "Current connected clients: " << client_sockets.size() << std::endl;
-    for (size_t i = 0; i < client_sockets.size(); ++i)
-    {
-        std::cout << "Client " << i << ": socket fd = " << client_sockets[i] << std::endl;
+    int32_t clientfd;            // client file descriptor
+    int32_t serverfd;            // server file descriptor
+    std::vector<singleClient> clientList; // for storing all the client fd
+    clientDetails(void)
+    { // initializing the variable
+        this->clientfd = -1;
+        this->serverfd = -1;
     }
-}
+};
 
-// Function to broadcast a message to all clients
-void broadcastMessage(const std::string &message)
-{
-    std::lock_guard<std::mutex> lock(clients_mutex); // Lock for thread safety
-    for (int client_sock : client_sockets)
-    {
-        send(client_sock, message.c_str(), message.length(), 0);
-    }
-}
+const int port = 8080;
+const char ip[] = "127.0.0.1"; // for local host
+// const ip[]="0.0.0.0"; // for allowing all incomming connection from internet
+const int backlog = 5; // maximum number of connection allowed
+const char password[] = "bean";
 
-// Function to send a message to a specific client, client_sock is the socket fd
-void sendMessageToClient(int client_sock, const std::string &message)
-{
-    ssize_t bytesSent = send(client_sock, message.c_str(), message.length(), 0);
-    if (bytesSent == -1)
-    {
-        perror("Send failed");
-    }
-    else
-    {
-        std::cout << "Sent " << bytesSent << " bytes to client " << client_sock << ": " << message << std::endl;
-    }
-    std::string messsage1 = "++++++++++";
-    send(0, messsage1.c_str(), messsage1.length(), 0);
-}
-
-
-// Function to handle user input
-void userInputHandler()
-{
-    while (true)
-    {
-        std::cout << "Enter command\n";
-        std::cout << "      1. status to see clients\n";
-        std::cout << "      2. send [client_number] [message] to send message\n";
-        std::cout << "      3. exit to quit): \n";
-        std::string command;
-        std::getline(std::cin, command);
-
-        if (command == "exit")
-        {
-            break; // Exit the input handler
-        }
-        else if (command == "status")
-        {
-            printServerStatus(); // Print current server status
-        }
-        else if (command.substr(0, 4) == "send")
-        {
-            std::istringstream iss(command);
-            std::string firstWord, secondWord, message;
-            iss >> firstWord >> secondWord; // Read "send" and the client index
-
-            // Get the remaining message
-            std::getline(iss, message);
-            if (!message.empty() && message[0] == ' ')
-            {
-                message.erase(0, 1); // Remove leading space
-            }
-
-            int client_index = stoi(secondWord);
-            if (client_index < 0 || client_index >= client_sockets.size())
-            {
-                std::cout << "Invalid client number." << std::endl;
-                continue;
-            }
-
-            int client_sock = client_sockets[client_index]; // Correctly get the socket fd
-            sendMessageToClient(client_sock, message);
-            std::cout << "Server sent to client " << client_sock << ": " << message << std::endl;
-        }
-        else
-        {
-            std::cout << "Unknown command." << std::endl;
-        }
-    }
-}
 
 int main()
 {
-    int server_fd, new_socket;
-    struct sockaddr_in address;
-    int addrlen = sizeof(address);
-    char buffer[BUFFER_SIZE] = {0};
+    auto client = new clientDetails();
 
-    // Create socket
-    if ((server_fd = socket(AF_INET, SOCK_STREAM, 0)) == 0)
+    client->serverfd = socket(AF_INET, SOCK_STREAM, 0); // for tcp connection
+    // error handling
+    if (client->serverfd <= 0)
     {
-        perror("Socket failed");
-        exit(EXIT_FAILURE);
+        std::cerr << "socket creation error\n";
+        delete client;
+        exit(1);
+    }
+    else
+    {
+        std::cout << "socket created\n";
+    }
+    // setting serverFd to allow multiple connection
+    int opt = 1;
+    if (setsockopt(client->serverfd, SOL_SOCKET, SO_REUSEADDR, (char *)&opt, sizeof opt) < 0)
+    {
+        std::cerr << "setSocketopt error\n";
+        delete client;
+        exit(2);
     }
 
-    // Set socket to non-blocking
-    if (setNonBlocking(server_fd) == -1)
+    // setting the server address
+    struct sockaddr_in serverAddr;
+    serverAddr.sin_family = AF_INET;
+    serverAddr.sin_port = htons(port);
+    inet_pton(AF_INET, ip, &serverAddr.sin_addr);
+    // binding the server address
+    if (bind(client->serverfd, (struct sockaddr *)&serverAddr, sizeof(serverAddr)) < 0)
     {
-        perror("Failed to set non-blocking");
-        exit(EXIT_FAILURE);
+        std::cerr << "bind error\n";
+        delete client;
+        exit(3);
+    }
+    else
+    {
+        std::cout << "server binded\n";
+    }
+    // listening to the port
+    if (listen(client->serverfd, backlog) < 0)
+    {
+        std::cerr << "listen error\n";
+        delete client;
+        exit(4);
+    }
+    else
+    {
+        std::cout << "server is listening\n";
     }
 
-    // Setup server address
-    address.sin_family = AF_INET;
-    address.sin_addr.s_addr = INADDR_ANY;
-    address.sin_port = htons(PORT);
-
-    // Bind the socket
-    if (bind(server_fd, (struct sockaddr *)&address, sizeof(address)) < 0)
-    {
-        perror("Bind failed");
-        exit(EXIT_FAILURE);
-    }
-
-    // Start listening
-    if (listen(server_fd, MAX_CLIENTS) < 0)
-    {
-        perror("Listen failed");
-        exit(EXIT_FAILURE);
-    }
-
-    std::cout << "Server is listening on port " << PORT << "..." << std::endl;
-
-    // Start a thread to handle user input
-    std::thread input_thread(userInputHandler);
-
+    fd_set readfds;
+    size_t valread;
+    int maxfd;
+    int sd = 0;
+    int activity;
     while (true)
     {
-        fd_set readfds;
+        std::cout << "waiting for activity\n";
         FD_ZERO(&readfds);
-        FD_SET(server_fd, &readfds);
-        int max_sd = server_fd;
-
-        // Add child sockets to set
+        FD_SET(client->serverfd, &readfds);
+        maxfd = client->serverfd;
+        // copying the client list to readfds
+        // so that we can listen to all the client
+        for (auto currentClient : client->clientList)
         {
-            std::lock_guard<std::mutex> lock(clients_mutex); // Lock for thread safety
-            for (int i : client_sockets)
+
+            int32_t sd = currentClient.clientfd;
+            FD_SET(sd, &readfds);
+            if (sd > maxfd)
             {
-                if (i > 0)
-                {
-                    FD_SET(i, &readfds);
-                }
-                if (i > max_sd)
-                {
-                    max_sd = i;
-                }
+                maxfd = sd;
             }
         }
-
-        // Wait for activity on sockets
-        int activity = select(max_sd + 1, &readfds, nullptr, nullptr, nullptr);
-
-        // Check for new connections
-        if (FD_ISSET(server_fd, &readfds))
+        //
+        if (sd > maxfd)
         {
-            if ((new_socket = accept(server_fd, (struct sockaddr *)&address, (socklen_t *)&addrlen)) < 0)
-            {
-                perror("Accept failed");
-                exit(EXIT_FAILURE);
-            }
-            std::cout << "New connection accepted: socket fd is " << new_socket << std::endl;
-
-            {
-                std::lock_guard<std::mutex> lock(clients_mutex); // Lock for thread safety
-                client_sockets.push_back(new_socket);
-            }
+            maxfd = sd;
         }
+        /* using select for listen to multiple client
+           select(int nfds, fd_set *restrict readfds, fd_set *restrict writefds,
+           fd_set *restrict errorfds, struct timeval *restrict timeout);
+        */
 
-        // Check for incoming messages from clients
-        for (size_t i = 0; i < client_sockets.size(); ++i)
+        // for more information about select type 'man select' in terminal
+        activity = select(maxfd + 1, &readfds, NULL, NULL, NULL);
+        if (activity < 0)
         {
-            int client_sock = client_sockets[i];
-            if (FD_ISSET(client_sock, &readfds))
+            std::cerr << "select error\n";
+            continue;
+        }
+        /*
+         * if something happen on client->serverfd then it means its
+         * new connection request
+         */
+        if (FD_ISSET(client->serverfd, &readfds))
+        {
+            client->clientfd = accept(client->serverfd, (struct sockaddr *)NULL, NULL);
+            if (client->clientfd < 0)
             {
-                int valread = read(client_sock, buffer, BUFFER_SIZE);
+                std::cerr << "accept error\n";
+                continue;
+            }
+            // adding client to list
+
+            singleClient temp_client;
+            temp_client.clientfd = client->clientfd;
+            temp_client.log_in_status = false;
+            client->clientList.push_back(temp_client);
+            std::cout << "new client connected\n";
+            std::cout << "new connection, socket fd is " << client->clientfd << ", ip is: "
+                      << inet_ntoa(serverAddr.sin_addr) << ", port: " << ntohs(serverAddr.sin_port) << "\n";
+
+
+
+            std::string buffer = "Login:\n";
+            send(client->clientfd, buffer.c_str(), strlen(buffer.c_str()), MSG_DONTROUTE);
+            /*
+             * std::thread t1(handleConnection, client);
+             * t1.detach();
+             *handle the new connection in new thread
+             */
+        }
+        /*
+         * else some io operation on some socket
+         */
+
+        // for storing the recive message
+        char message[1024];
+        for (int i = 0; i < client->clientList.size(); ++i)
+        {
+            memset(message, 0, 1024);
+            sd = client->clientList[i].clientfd;
+            if (FD_ISSET(sd, &readfds))
+            {
+                valread = read(sd, message, 1024);
+
+                // check if client disconnected
                 if (valread == 0)
                 {
-                    // Client disconnected
-                    std::cout << "Client disconnected: socket fd is " << client_sock << std::endl;
-                    close(client_sock);
-                    {
-                        std::lock_guard<std::mutex> lock(clients_mutex); // Lock for thread safety
-                        client_sockets.erase(client_sockets.begin() + i);
-                    }
-                    --i;
-                }
-                else
-                {
-                    buffer[valread] = '\0';
-                    std::cout << "Message from client: " << buffer << std::endl;
+                    std::cout << "client disconnected\n";
 
-                    // Echo the message back to the client
-                    //send(client_sock, buffer, strlen(buffer), 0);
+                    getpeername(sd, (struct sockaddr *)&serverAddr, (socklen_t *)&serverAddr);
+                    // getpeername name return the address of the client (sd)
+
+                    std::cout << "host disconnected, ip: " << inet_ntoa(serverAddr.sin_addr) << ", port: " << ntohs(serverAddr.sin_port) << "\n";
+                    close(sd);
+                    /* remove the client from the list */
+                    client->clientList.erase(client->clientList.begin() + i);
                 }
+
+                int message_len = strlen(message);
+
+                char temp_message[1024];
+
+                if (message_len > 2){
+                    strcpy(temp_message, message);
+                    temp_message[message_len-2] = '\0';
+                    if (strcmp(temp_message, "exit") == 0)
+                    {
+                        std::cout << "client disconnected\n";
+
+                        getpeername(sd, (struct sockaddr *)&serverAddr, (socklen_t *)&serverAddr);
+                        // getpeername name return the address of the client (sd)
+
+                        std::cout << "host disconnected, ip: " << inet_ntoa(serverAddr.sin_addr) << ", port: " << ntohs(serverAddr.sin_port) << "\n";
+                        close(sd);
+                        /* remove the client from the list */
+                        client->clientList.erase(client->clientList.begin() + i);
+                    }
+                    else
+                    {
+                        if (client->clientList[i].log_in_status == false){
+                            if (strcmp(temp_message, password) == 0)
+                            {
+                                client->clientList[i].log_in_status = true;
+                                std::string buffer = "Successful login\n";
+                                send(client->clientfd, buffer.c_str(), strlen(buffer.c_str()), MSG_DONTROUTE);
+                            }
+                            else
+                            {
+                                std::string temp(temp_message);
+                                std::string buffer =  temp + " is incorrect. Try again\n";
+                                std::cout << "buffer: " << buffer << std::endl;
+                                send(client->clientfd, buffer.c_str(), strlen(buffer.c_str()), MSG_DONTROUTE);
+                            }
+                        }
+                        else{
+                            std::cout << "message from client: " << temp_message << "\n";
+                            std::string temp(temp_message);
+                            if (temp.compare(0, 12, "Set Username") == 0)
+                            {
+                                client->clientList[i].username = temp.substr(13, temp.length());
+                                std::cout << "Client username set to: " <<  client->clientList[i].username << std::endl;
+                            }
+                            /*
+                            * handle the message in new thread
+                            * so that we can listen to other client
+                            * in the main thread
+                            * std::thread t1(handleMessage, client, message);
+                            * // detach the thread so that it can run independently
+                            * t1.detach();
+                            */
+                        }
+
+                    }
+                }
+                
             }
         }
     }
-
-    input_thread.join(); // Wait for the input thread to finish
-    close(server_fd);
+    delete client;
     return 0;
 }
