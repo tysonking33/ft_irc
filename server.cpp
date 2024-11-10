@@ -6,6 +6,9 @@
 #include <unistd.h>     // for close()
 #include <vector>       // for storing client
 #include <string.h>
+#include <memory>
+#include <sstream>
+
 
 /*
  consider adding thread if handling multiple client
@@ -17,33 +20,33 @@
 */
 
 
-struct singleClient;
+struct Group;
 
-struct Group{
-    std::string groupName;
-    std::vector<singleClient> membersList;
-    Group(void)
-    {
-        groupName = "defaultGroupName";
-    }
-};
-
-struct singleClient
-{
+struct singleClient {
     int clientId;
     int32_t clientfd;            // client file descriptor
     std::string username;
-    std::string password;
     bool log_in_status;
-    std::vector<struct Group> chatgroupList;
+    std::vector<std::shared_ptr<Group>> chatgroupList; // Use shared_ptr to Group to allow incomplete type
     singleClient(void)
-    {
-        clientId = -1;
-        clientfd = -1;
-        username = "defaultUsername";
-        password = "defaultPassword";
-        log_in_status = false;
-    }
+        : clientId(-1), clientfd(-1), username("defaultUsername"), log_in_status(false)
+    {}
+};
+
+struct Group {
+    std::string groupName;
+    std::vector<std::shared_ptr<singleClient>> membersList; // Use shared_ptr to singleClient
+    bool inviteOnly;
+    std::string topic;
+    std::shared_ptr<singleClient> owner; // Use shared_ptr for owner
+    bool password_on;
+    std::string password;
+    bool member_limit_on;
+    int memberLimit;
+
+    Group(void)
+        : groupName("defaultGroupName"), inviteOnly(false), topic("defaultTopic"), password_on(false), password("defaultPassword"), member_limit_on(false)
+    {}
 };
 
 struct clientDetails
@@ -58,7 +61,7 @@ struct clientDetails
     }
 };
 
-const int port = 8080;
+const int port = 8081;
 const char ip[] = "127.0.0.1"; // for local host
 // const ip[]="0.0.0.0"; // for allowing all incomming connection from internet
 const int backlog = 5; // maximum number of connection allowed
@@ -68,6 +71,7 @@ const char password[] = "bean";
 int main()
 {
     auto client = new clientDetails();
+    std::vector<Group> groupList;
 
     client->serverfd = socket(AF_INET, SOCK_STREAM, 0); // for tcp connection
     // error handling
@@ -225,7 +229,7 @@ int main()
                 if (message_len > 2){
                     strcpy(temp_message, message);
                     temp_message[message_len-2] = '\0';
-                    if (strcmp(temp_message, "exit") == 0)
+                    if ((strcmp(temp_message, "exit") == 0) || (strcmp(temp_message, "quit") == 0))
                     {
                         std::cout << "client disconnected\n";
 
@@ -261,6 +265,84 @@ int main()
                             {
                                 client->clientList[i].username = temp.substr(13, temp.length());
                                 std::cout << "Client username set to: " <<  client->clientList[i].username << std::endl;
+                            }
+                            else if (temp.compare(0, 12, "Create Group") == 0)
+                            {
+                                Group newGroup;
+                                newGroup.groupName = temp.substr(13, temp.length());
+                                newGroup.membersList.emplace_back(std::make_shared<singleClient>(client->clientList[i]));
+                                newGroup.owner = std::make_shared<singleClient>(client->clientList[i]);
+                                client->clientList[i].chatgroupList.emplace_back(std::make_shared<Group>(newGroup));
+                                groupList.push_back(newGroup);
+                                std::cout << "Group " <<  newGroup.groupName << " created\n";
+                                std::cout << client->clientList[i].username <<  " added to " << newGroup.groupName << " as Creator" <<std::endl;
+                            }
+                            else if (temp.compare(0, 6, "STATUS") == 0)
+                            {
+                                std::cout << "/*-------------------*/\n";
+                                std::cout << "/*-     status      -*/\n";
+                                std::cout << "/*-------------------*/\n";
+                                std::cout << "Clientfd: " << client->clientfd << std::endl;
+                                std::cout << "Serverfd: " << client->serverfd << std::endl;
+                                std::cout << "/*-------------------*/\n";
+                                std::cout << "Client List\n";
+                                for (auto client : client->clientList)
+                                {
+                                    if (client.log_in_status == true)
+                                    {
+                                        std::cout << "Clientfd: " << client.clientfd << " | username: " << client.username << " | logged in\n";
+
+                                        std::cout << "Groups joined:\n";
+                                        for (auto group : client.chatgroupList)
+                                        {
+                                            if (group->inviteOnly == true)
+                                            {
+                                                std::cout << " -    " << group->groupName << " | " << group->topic << "| private group";
+                                            }
+                                            else
+                                            {
+                                                std::cout << " -    " << group->groupName << " | " << group->topic << "| public group";
+                                            }
+                                        }
+                                    }
+                                    else
+                                    {
+                                        std::cout << "Clientfd: " << client.clientfd << " | username: " << client.username << " | logged out\n";
+                                        std::cout << "Groups joined:\n";
+                                        for (auto group : client.chatgroupList)
+                                        {
+                                            if (group->inviteOnly == true)
+                                            {
+                                                std::cout << " -    " << group->groupName << " | " << group->topic << "| private group";
+                                            }
+                                            else
+                                            {
+                                                std::cout << " -    " << group->groupName << " | " << group->topic << "| public group";
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            else if (temp.compare(0, 12, "Send To User") == 0)
+                            {
+                                std::cout << "Command: Send To Use\n";
+                                char delimiter = ' ';
+                                temp = temp.substr(13, (int)temp.length() - 1);
+
+                                std::string username = temp.substr(0,temp.find(' '));
+                                std::string message = temp.substr(temp.find(' ')+1, (int)temp.length() - 1);
+                                message += "\0";
+
+                                std::cout << "username: " << username << ", sends "<< message << std::endl;
+
+
+                                for (auto currentClient: client->clientList)
+                                {
+                                    if (currentClient.username.compare(username) == 0)
+                                    {
+                                        send(currentClient.clientfd, message.c_str(), strlen(message.c_str()), MSG_DONTROUTE);
+                                    }
+                                }
                             }
                             /*
                             * handle the message in new thread
