@@ -196,6 +196,39 @@ void print_status(clientDetails *clientInfo)
     }
 }
 
+void add_to_group(clientDetails *clientInfo, std::vector<Group *> &groupList, std::string src_string, singleClient current_client)
+{
+    std::string GroupName = src_string.substr(0, src_string.find(' '));
+    std::string newUser = src_string.substr(src_string.find(' ') + 1, src_string.length() - 1);
+
+    for (int i = 0; i < (int)clientInfo->clientList.size(); i++)
+    {
+        if (clientInfo->clientList[i]->username == newUser)
+        {
+            std::cout << "client exist\n";
+            for (int j = 0; j < (int)groupList.size(); j++)
+            {
+                if (groupList[j]->groupName == GroupName)
+                {
+                    std::cout << "group exists\n";
+                    clientInfo->clientList[i]->chatgroupList.push_back(groupList[j]);
+                    groupList[j]->membersList.push_back(clientInfo->clientList[i]);
+                    std::string result = "Added " + newUser + " to " + GroupName;
+                    send(clientInfo->clientfd, result.c_str(), strlen(result.c_str()), MSG_DONTROUTE);
+
+                    return;
+                }
+            }
+            std::cout << "Group: " << GroupName << " does not exist\n";
+        }
+    }
+    std::cout << "new Member: " << newUser << " does not exist\n";
+
+    std::string buffer = "Failed to add" + newUser + " to " + GroupName + ". Try again\n";
+    std::cout << "buffer: " << buffer << std::endl;
+    send(clientInfo->clientfd, buffer.c_str(), strlen(buffer.c_str()), MSG_DONTROUTE);
+}
+
 int main()
 {
     clientDetails *clientInfo = new clientDetails();
@@ -403,10 +436,6 @@ int main()
                                 current_client->username = temp.substr(13, temp.length());
                                 std::cout << "Client username set to: " << current_client->username << std::endl;
                             }
-                            else if (temp.compare(0, 12, "Create Group") == 0)
-                            {
-                                create_group(clientInfo, groupList, current_client, temp.substr(13, temp.length()));
-                            }
                             else if (temp.compare(0, 6, "STATUS") == 0)
                             {
                                 print_status(clientInfo);
@@ -415,6 +444,10 @@ int main()
                             {
                                 send_to_user(clientInfo, temp.substr(13, (int)temp.length() - 1));
                             }
+                            else if (temp.compare(0, 12, "Create Group") == 0)
+                            {
+                                create_group(clientInfo, groupList, current_client, temp.substr(13, temp.length()));
+                            }
                             else if (temp.compare(0, 13, "Send To Group") == 0)
                             {
                                 find_and_send_to_group(groupList, temp.substr(14, (int)temp.length() - 1));
@@ -422,6 +455,10 @@ int main()
                             else if (temp.compare(0, 10, "Join Group") == 0)
                             {
                                 join_group(groupList, temp.substr(11, (int)temp.length() - 1), current_client);
+                            }
+                            else if (temp.compare(0, 12, "Add To Group") == 0)
+                            {
+                                add_to_group(clientInfo, groupList, temp.substr(13, (int)temp.length() - 1), *current_client);
                             }
                             /*
                              * handle the message in new thread
