@@ -8,7 +8,7 @@
 #include <string.h>
 #include <memory>
 #include <sstream>
-
+#include <algorithm>
 
 /*
  consider adding thread if handling multiple client
@@ -19,41 +19,54 @@
  passing the argument to new thread;
 */
 
+struct Group; // Forward declaration
 
-struct Group;
-
-struct singleClient {
+struct singleClient
+{
     int clientId;
-    int32_t clientfd;            // client file descriptor
+    int32_t clientfd; // Client file descriptor
     std::string username;
     bool log_in_status;
-    std::vector<std::shared_ptr<Group>> chatgroupList; // Use shared_ptr to Group to allow incomplete type
-    singleClient(void)
-        : clientId(-1), clientfd(-1), username("defaultUsername"), log_in_status(false)
-    {}
+    std::vector<Group *> chatgroupList; // Use raw pointers to Group
+
+    singleClient()
+        : clientId(-1), clientfd(-1), username("defaultUsername"), log_in_status(false) {}
+
+    ~singleClient()
+    {
+        // Destructor doesn't delete chatgroupList elements
+        // Ownership is handled by the container or elsewhere
+    }
 };
 
-struct Group {
+struct Group
+{
     std::string groupName;
-    std::vector<std::shared_ptr<singleClient>> membersList; // Use shared_ptr to singleClient
+    std::vector<singleClient *> membersList; // Use raw pointers to singleClient
     bool inviteOnly;
     std::string topic;
-    std::shared_ptr<singleClient> owner; // Use shared_ptr for owner
+    singleClient *owner; // Raw pointer to owner
     bool password_on;
     std::string password;
     bool member_limit_on;
     int memberLimit;
 
-    Group(void)
-        : groupName("defaultGroupName"), inviteOnly(false), topic("defaultTopic"), password_on(false), password("defaultPassword"), member_limit_on(false)
-    {}
+    Group()
+        : groupName("defaultGroupName"), inviteOnly(false), topic("defaultTopic"),
+          owner(nullptr), password_on(false), password("defaultPassword"), member_limit_on(false) {}
+
+    ~Group()
+    {
+        // Destructor doesn't delete membersList elements
+        // Ownership is handled by the container or elsewhere
+    }
 };
 
 struct clientDetails
 {
-    int32_t clientfd;            // client file descriptor
-    int32_t serverfd;            // server file descriptor
-    std::vector<singleClient> clientList; // for storing all the client fd
+    int32_t clientfd; // client file descriptor
+    int32_t serverfd; // server file descriptor
+    std::vector<singleClient *> clientList;
     clientDetails(void)
     { // initializing the variable
         this->clientfd = -1;
@@ -67,18 +80,133 @@ const char ip[] = "127.0.0.1"; // for local host
 const int backlog = 5; // maximum number of connection allowed
 const char password[] = "bean";
 
+void find_and_send_to_group(std::vector<Group *> groupList, std::string src_string)
+{
+    char delimiter = ' ';
+
+    std::string GroupName = src_string.substr(0, src_string.find(' '));
+    std::string message = src_string.substr(src_string.find(' ') + 1, src_string.length() - 1);
+    message += "\0";
+
+    for (int i = 0; i < (int)groupList.size(); i++)
+    {
+        if (groupList[i]->groupName == GroupName)
+        {
+            std::cout << "Found Group with name: " << GroupName << std::endl;
+            Group *target_group = groupList[i];
+            for (int j = 0; j < (int)target_group->membersList.size(); j++)
+            {
+                send(target_group->membersList[j]->clientfd, message.c_str(), strlen(message.c_str()), MSG_DONTROUTE);
+            }
+            return;
+        }
+    }
+    std::cout << "No Group with name " << GroupName << " found." << std::endl;
+}
+
+void join_group(std::vector<Group *> &groupList, std::string targetGroup, singleClient *client)
+{
+    for (int i = 0; i < (int)groupList.size(); i++)
+    {
+        if (groupList[i]->groupName == targetGroup)
+        {
+            std::cout << "Found Group with name: " << targetGroup << std::endl;
+            groupList[i]->membersList.push_back(client);
+            client->chatgroupList.push_back(groupList[i]);
+            return;
+        }
+    }
+    std::cout << "No Group with name " << targetGroup << " found." << std::endl;
+}
+
+void send_to_user(clientDetails *client, std::string src_string)
+{
+    std::cout << "Command: Send To Use\n";
+    char delimiter = ' ';
+
+    std::string target_username = src_string.substr(0, src_string.find(' '));
+    std::string message = src_string.substr(src_string.find(' ') + 1, (int)src_string.length() - 1);
+    message += "\0";
+
+    std::cout << "username: " << target_username << ", sends " << message << std::endl;
+
+    for (int i = 0; i < (int)client->clientList.size(); i++)
+    {
+        if (client->clientList[i]->username.compare(target_username) == 0)
+        {
+            send(client->clientList[i]->clientfd, message.c_str(), strlen(message.c_str()), MSG_DONTROUTE);
+        }
+    }
+}
+
+void create_group(clientDetails *client, std::vector<Group *> &groupList, singleClient *current_client, std::string newGroupName)
+{
+    Group *newGroup = new Group();
+    newGroup->groupName = newGroupName;
+    newGroup->membersList.push_back(current_client);
+    newGroup->owner = current_client;
+    current_client->chatgroupList.push_back(newGroup);
+    groupList.push_back(newGroup); // Ensure this modifies the original vector
+}
+
+void print_status(clientDetails *clientInfo)
+{
+    std::cout << "/*-------------------*/\n";
+    std::cout << "/*-     status      -*/\n";
+    std::cout << "/*-------------------*/\n";
+    std::cout << "Clientfd: " << clientInfo->clientfd << std::endl;
+    std::cout << "Serverfd: " << clientInfo->serverfd << std::endl;
+    std::cout << "/*-------------------*/\n";
+    std::cout << "Client List\n";
+    for (auto tempClient : clientInfo->clientList)
+    {
+        if (tempClient->log_in_status == true)
+        {
+            std::cout << "Clientfd: " << tempClient->clientfd << " | username: " << tempClient->username << " | logged in\n";
+
+            std::cout << "Groups joined:\n";
+            for (auto group : tempClient->chatgroupList)
+            {
+                if (group->inviteOnly == true)
+                {
+                    std::cout << " -    " << group->groupName << " | " << group->topic << "| private group";
+                }
+                else
+                {
+                    std::cout << " -    " << group->groupName << " | " << group->topic << "| public group";
+                }
+            }
+        }
+        else
+        {
+            std::cout << "Clientfd: " << tempClient->clientfd << " | username: " << tempClient->username << " | logged out\n";
+            std::cout << "Groups joined:\n";
+            for (auto group : tempClient->chatgroupList)
+            {
+                if (group->inviteOnly == true)
+                {
+                    std::cout << " -    " << group->groupName << " | " << group->topic << "| private group";
+                }
+                else
+                {
+                    std::cout << " -    " << group->groupName << " | " << group->topic << "| public group";
+                }
+            }
+        }
+    }
+}
 
 int main()
 {
-    auto client = new clientDetails();
-    std::vector<Group> groupList;
+    clientDetails *clientInfo = new clientDetails();
+    std::vector<Group *> groupList;
 
-    client->serverfd = socket(AF_INET, SOCK_STREAM, 0); // for tcp connection
+    clientInfo->serverfd = socket(AF_INET, SOCK_STREAM, 0); // for tcp connection
     // error handling
-    if (client->serverfd <= 0)
+    if (clientInfo->serverfd <= 0)
     {
         std::cerr << "socket creation error\n";
-        delete client;
+        delete clientInfo;
         exit(1);
     }
     else
@@ -87,10 +215,10 @@ int main()
     }
     // setting serverFd to allow multiple connection
     int opt = 1;
-    if (setsockopt(client->serverfd, SOL_SOCKET, SO_REUSEADDR, (char *)&opt, sizeof opt) < 0)
+    if (setsockopt(clientInfo->serverfd, SOL_SOCKET, SO_REUSEADDR, (char *)&opt, sizeof opt) < 0)
     {
         std::cerr << "setSocketopt error\n";
-        delete client;
+        delete clientInfo;
         exit(2);
     }
 
@@ -100,10 +228,10 @@ int main()
     serverAddr.sin_port = htons(port);
     inet_pton(AF_INET, ip, &serverAddr.sin_addr);
     // binding the server address
-    if (bind(client->serverfd, (struct sockaddr *)&serverAddr, sizeof(serverAddr)) < 0)
+    if (bind(clientInfo->serverfd, (struct sockaddr *)&serverAddr, sizeof(serverAddr)) < 0)
     {
         std::cerr << "bind error\n";
-        delete client;
+        delete clientInfo;
         exit(3);
     }
     else
@@ -111,10 +239,10 @@ int main()
         std::cout << "server binded\n";
     }
     // listening to the port
-    if (listen(client->serverfd, backlog) < 0)
+    if (listen(clientInfo->serverfd, backlog) < 0)
     {
         std::cerr << "listen error\n";
-        delete client;
+        delete clientInfo;
         exit(4);
     }
     else
@@ -131,14 +259,14 @@ int main()
     {
         std::cout << "waiting for activity\n";
         FD_ZERO(&readfds);
-        FD_SET(client->serverfd, &readfds);
-        maxfd = client->serverfd;
+        FD_SET(clientInfo->serverfd, &readfds);
+        maxfd = clientInfo->serverfd;
         // copying the client list to readfds
         // so that we can listen to all the client
-        for (auto currentClient : client->clientList)
+        for (auto currentClient : clientInfo->clientList)
         {
 
-            int32_t sd = currentClient.clientfd;
+            int32_t sd = currentClient->clientfd;
             FD_SET(sd, &readfds);
             if (sd > maxfd)
             {
@@ -163,33 +291,31 @@ int main()
             continue;
         }
         /*
-         * if something happen on client->serverfd then it means its
+         * if something happen on clientInfo->serverfd then it means its
          * new connection request
          */
-        if (FD_ISSET(client->serverfd, &readfds))
+        if (FD_ISSET(clientInfo->serverfd, &readfds))
         {
-            client->clientfd = accept(client->serverfd, (struct sockaddr *)NULL, NULL);
-            if (client->clientfd < 0)
+            clientInfo->clientfd = accept(clientInfo->serverfd, (struct sockaddr *)NULL, NULL);
+            if (clientInfo->clientfd < 0)
             {
                 std::cerr << "accept error\n";
                 continue;
             }
             // adding client to list
 
-            singleClient temp_client;
-            temp_client.clientfd = client->clientfd;
-            temp_client.log_in_status = false;
-            client->clientList.push_back(temp_client);
+            singleClient *temp_client = new singleClient();
+            temp_client->clientfd = clientInfo->clientfd;
+            temp_client->log_in_status = false;
+            clientInfo->clientList.push_back(temp_client);
             std::cout << "new client connected\n";
-            std::cout << "new connection, socket fd is " << client->clientfd << ", ip is: "
+            std::cout << "new connection, socket fd is " << clientInfo->clientfd << ", ip is: "
                       << inet_ntoa(serverAddr.sin_addr) << ", port: " << ntohs(serverAddr.sin_port) << "\n";
 
-
-
             std::string buffer = "Login:\n";
-            send(client->clientfd, buffer.c_str(), strlen(buffer.c_str()), MSG_DONTROUTE);
+            send(clientInfo->clientfd, buffer.c_str(), strlen(buffer.c_str()), MSG_DONTROUTE);
             /*
-             * std::thread t1(handleConnection, client);
+             * std::thread t1(handleConnection, clientInfo);
              * t1.detach();
              *handle the new connection in new thread
              */
@@ -200,13 +326,18 @@ int main()
 
         // for storing the recive message
         char message[1024];
-        for (int i = 0; i < client->clientList.size(); ++i)
+        for (int i = 0; i < clientInfo->clientList.size(); ++i)
         {
             memset(message, 0, 1024);
-            sd = client->clientList[i].clientfd;
+            sd = clientInfo->clientList[i]->clientfd;
+            singleClient *current_client = clientInfo->clientList[i];
             if (FD_ISSET(sd, &readfds))
             {
                 valread = read(sd, message, 1024);
+                if (valread > 0)
+                {
+                    message[valread] = '\0'; // Null-terminate the message
+                }
 
                 // check if client disconnected
                 if (valread == 0)
@@ -219,16 +350,18 @@ int main()
                     std::cout << "host disconnected, ip: " << inet_ntoa(serverAddr.sin_addr) << ", port: " << ntohs(serverAddr.sin_port) << "\n";
                     close(sd);
                     /* remove the client from the list */
-                    client->clientList.erase(client->clientList.begin() + i);
+                    clientInfo->clientList.erase(clientInfo->clientList.begin() + i);
                 }
 
                 int message_len = strlen(message);
 
                 char temp_message[1024];
 
-                if (message_len > 2){
+                if (message_len > 2)
+                {
                     strcpy(temp_message, message);
-                    temp_message[message_len-2] = '\0';
+                    temp_message[message_len - 1] = '\0';
+                    std::cout << "temp_message:  " << temp_message << std::endl;
                     if ((strcmp(temp_message, "exit") == 0) || (strcmp(temp_message, "quit") == 0))
                     {
                         std::cout << "client disconnected\n";
@@ -239,127 +372,75 @@ int main()
                         std::cout << "host disconnected, ip: " << inet_ntoa(serverAddr.sin_addr) << ", port: " << ntohs(serverAddr.sin_port) << "\n";
                         close(sd);
                         /* remove the client from the list */
-                        client->clientList.erase(client->clientList.begin() + i);
+                        clientInfo->clientList.erase(clientInfo->clientList.begin() + i);
                     }
                     else
                     {
-                        if (client->clientList[i].log_in_status == false){
+                        if (current_client->log_in_status == false)
+                        {
                             if (strcmp(temp_message, password) == 0)
                             {
-                                client->clientList[i].log_in_status = true;
+                                std::cout << "successful login\n";
+                                current_client->log_in_status = true;
                                 std::string buffer = "Successful login\n";
-                                send(client->clientfd, buffer.c_str(), strlen(buffer.c_str()), MSG_DONTROUTE);
+                                send(clientInfo->clientfd, buffer.c_str(), strlen(buffer.c_str()), MSG_DONTROUTE);
                             }
                             else
                             {
+                                std::cout << "failed login\n";
                                 std::string temp(temp_message);
-                                std::string buffer =  temp + " is incorrect. Try again\n";
+                                std::string buffer = temp + " is incorrect. Try again\n";
                                 std::cout << "buffer: " << buffer << std::endl;
-                                send(client->clientfd, buffer.c_str(), strlen(buffer.c_str()), MSG_DONTROUTE);
+                                send(clientInfo->clientfd, buffer.c_str(), strlen(buffer.c_str()), MSG_DONTROUTE);
                             }
                         }
-                        else{
+                        else
+                        {
                             std::cout << "message from client: " << temp_message << "\n";
                             std::string temp(temp_message);
                             if (temp.compare(0, 12, "Set Username") == 0)
                             {
-                                client->clientList[i].username = temp.substr(13, temp.length());
-                                std::cout << "Client username set to: " <<  client->clientList[i].username << std::endl;
+                                current_client->username = temp.substr(13, temp.length());
+                                std::cout << "Client username set to: " << current_client->username << std::endl;
                             }
                             else if (temp.compare(0, 12, "Create Group") == 0)
                             {
-                                Group newGroup;
-                                newGroup.groupName = temp.substr(13, temp.length());
-                                newGroup.membersList.emplace_back(std::make_shared<singleClient>(client->clientList[i]));
-                                newGroup.owner = std::make_shared<singleClient>(client->clientList[i]);
-                                client->clientList[i].chatgroupList.emplace_back(std::make_shared<Group>(newGroup));
-                                groupList.push_back(newGroup);
-                                std::cout << "Group " <<  newGroup.groupName << " created\n";
-                                std::cout << client->clientList[i].username <<  " added to " << newGroup.groupName << " as Creator" <<std::endl;
+                                create_group(clientInfo, groupList, current_client, temp.substr(13, temp.length()));
                             }
                             else if (temp.compare(0, 6, "STATUS") == 0)
                             {
-                                std::cout << "/*-------------------*/\n";
-                                std::cout << "/*-     status      -*/\n";
-                                std::cout << "/*-------------------*/\n";
-                                std::cout << "Clientfd: " << client->clientfd << std::endl;
-                                std::cout << "Serverfd: " << client->serverfd << std::endl;
-                                std::cout << "/*-------------------*/\n";
-                                std::cout << "Client List\n";
-                                for (auto client : client->clientList)
-                                {
-                                    if (client.log_in_status == true)
-                                    {
-                                        std::cout << "Clientfd: " << client.clientfd << " | username: " << client.username << " | logged in\n";
-
-                                        std::cout << "Groups joined:\n";
-                                        for (auto group : client.chatgroupList)
-                                        {
-                                            if (group->inviteOnly == true)
-                                            {
-                                                std::cout << " -    " << group->groupName << " | " << group->topic << "| private group";
-                                            }
-                                            else
-                                            {
-                                                std::cout << " -    " << group->groupName << " | " << group->topic << "| public group";
-                                            }
-                                        }
-                                    }
-                                    else
-                                    {
-                                        std::cout << "Clientfd: " << client.clientfd << " | username: " << client.username << " | logged out\n";
-                                        std::cout << "Groups joined:\n";
-                                        for (auto group : client.chatgroupList)
-                                        {
-                                            if (group->inviteOnly == true)
-                                            {
-                                                std::cout << " -    " << group->groupName << " | " << group->topic << "| private group";
-                                            }
-                                            else
-                                            {
-                                                std::cout << " -    " << group->groupName << " | " << group->topic << "| public group";
-                                            }
-                                        }
-                                    }
-                                }
+                                print_status(clientInfo);
                             }
                             else if (temp.compare(0, 12, "Send To User") == 0)
                             {
-                                std::cout << "Command: Send To Use\n";
-                                char delimiter = ' ';
-                                temp = temp.substr(13, (int)temp.length() - 1);
-
-                                std::string username = temp.substr(0,temp.find(' '));
-                                std::string message = temp.substr(temp.find(' ')+1, (int)temp.length() - 1);
-                                message += "\0";
-
-                                std::cout << "username: " << username << ", sends "<< message << std::endl;
-
-
-                                for (auto currentClient: client->clientList)
-                                {
-                                    if (currentClient.username.compare(username) == 0)
-                                    {
-                                        send(currentClient.clientfd, message.c_str(), strlen(message.c_str()), MSG_DONTROUTE);
-                                    }
-                                }
+                                send_to_user(clientInfo, temp.substr(13, (int)temp.length() - 1));
+                            }
+                            else if (temp.compare(0, 13, "Send To Group") == 0)
+                            {
+                                find_and_send_to_group(groupList, temp.substr(14, (int)temp.length() - 1));
+                            }
+                            else if (temp.compare(0, 10, "Join Group") == 0)
+                            {
+                                join_group(groupList, temp.substr(11, (int)temp.length() - 1), current_client);
                             }
                             /*
-                            * handle the message in new thread
-                            * so that we can listen to other client
-                            * in the main thread
-                            * std::thread t1(handleMessage, client, message);
-                            * // detach the thread so that it can run independently
-                            * t1.detach();
-                            */
+                             * handle the message in new thread
+                             * so that we can listen to other client
+                             * in the main thread
+                             * std::thread t1(handleMessage, client, message);
+                             * // detach the thread so that it can run independently
+                             * t1.detach();
+                             */
                         }
-
                     }
                 }
-                
+                else
+                {
+                    std::cout << "message: " << temp_message << " invalide\n";
+                }
             }
         }
     }
-    delete client;
+    delete clientInfo;
     return 0;
 }
