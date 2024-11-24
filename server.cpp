@@ -42,18 +42,22 @@ struct singleClient
 struct Group
 {
     std::string groupName;
-    std::vector<singleClient *> membersList; // Use raw pointers to singleClient
+    std::vector<singleClient *> membersList;  // Use raw pointers to singleClient
+    std::vector<singleClient *> OperatorList; // Use raw pointers to singleClient
+    std::vector<singleClient *> currentlySignedIn;
     bool inviteOnly;
     std::string topic;
+    bool topic_bool;
     singleClient *owner; // Raw pointer to owner
     bool password_on;
     std::string password;
     bool member_limit_on;
     int memberLimit;
+    int memberCount;
 
     Group()
-        : groupName("defaultGroupName"), inviteOnly(false), topic("defaultTopic"),
-          owner(nullptr), password_on(false), password("defaultPassword"), member_limit_on(false) {}
+        : groupName("defaultGroupName"), inviteOnly(false), topic("defaultTopic"), topic_bool(false),
+          owner(nullptr), password_on(false), password("defaultPassword"), member_limit_on(false), memberCount(0) {}
 
     ~Group()
     {
@@ -80,23 +84,60 @@ const char ip[] = "127.0.0.1"; // for local host
 const int backlog = 5; // maximum number of connection allowed
 const char password[] = "bean";
 
+void print_status(const clientDetails &details)
+{
+    std::cout << "Server Status:\n";
+    std::cout << "----------------------------------------\n";
+    std::cout << "Server File Descriptor: " << details.serverfd << "\n";
+    std::cout << "Connected Clients:\n";
+
+    for (size_t i = 0; i < details.clientList.size(); ++i)
+    {
+        singleClient *client = details.clientList[i];
+        if (client)
+        {
+            std::cout << "Client ID: " << client->clientId << "\n";
+            std::cout << "Client FD: " << client->clientfd << "\n";
+            std::cout << "Username: " << client->username << "\n";
+            std::cout << "Logged In: " << (client->log_in_status ? "Yes" : "No") << "\n";
+            std::cout << "Chat Groups:\n";
+
+            for (size_t j = 0; j < client->chatgroupList.size(); ++j)
+            {
+                Group *group = client->chatgroupList[j];
+                if (group)
+                {
+                    std::cout << "- Group Name: " << group->groupName << "\n";
+                    std::cout << "  Topic: " << group->topic << "\n";
+                    std::cout << "  Invite Only: " << (group->inviteOnly ? "Yes" : "No") << "\n";
+                    std::cout << "  Password Protected: " << (group->password_on ? "Yes" : "No") << "\n";
+                    std::cout << "  Member Limit: "
+                              << (group->member_limit_on ? group->memberLimit : -1)
+                              << "\n";
+                }
+            }
+        }
+        std::cout << "----------------------------------------\n";
+    }
+}
+
 void find_and_send_to_group(std::vector<Group *> groupList, std::string src_string)
 {
     char delimiter = ' ';
+    size_t pos = src_string.find(delimiter);
+    
+    std::string GroupName = src_string.substr(0, pos);
+    std::string message = src_string.substr(pos + 1);
 
-    std::string GroupName = src_string.substr(0, src_string.find(' '));
-    std::string message = src_string.substr(src_string.find(' ') + 1, src_string.length() - 1);
-    message += "\0";
-
-    for (int i = 0; i < (int)groupList.size(); i++)
+    for (size_t i = 0; i < groupList.size(); i++)
     {
         if (groupList[i]->groupName == GroupName)
         {
             std::cout << "Found Group with name: " << GroupName << std::endl;
             Group *target_group = groupList[i];
-            for (int j = 0; j < (int)target_group->membersList.size(); j++)
+            for (size_t j = 0; j < target_group->membersList.size(); j++)
             {
-                send(target_group->membersList[j]->clientfd, message.c_str(), strlen(message.c_str()), MSG_DONTROUTE);
+                send(target_group->membersList[j]->clientfd, message.c_str(), message.length(), MSG_DONTROUTE);
             }
             return;
         }
@@ -104,15 +145,25 @@ void find_and_send_to_group(std::vector<Group *> groupList, std::string src_stri
     std::cout << "No Group with name " << GroupName << " found." << std::endl;
 }
 
-void join_group(std::vector<Group *> &groupList, std::string targetGroup, singleClient *client)
+void join_group(std::vector<Group *> &groupList, const std::string &targetGroup, singleClient *client)
 {
-    for (int i = 0; i < (int)groupList.size(); i++)
+    for (size_t i = 0; i < groupList.size(); ++i)
     {
         if (groupList[i]->groupName == targetGroup)
         {
             std::cout << "Found Group with name: " << targetGroup << std::endl;
+
+            if (groupList[i]->member_limit_on && groupList[i]->memberCount >= groupList[i]->memberLimit)
+            {
+                std::cout << "Cannot join group: Member limit reached." << std::endl;
+                return;
+            }
+
             groupList[i]->membersList.push_back(client);
+            groupList[i]->memberCount++;
             client->chatgroupList.push_back(groupList[i]);
+
+            std::cout << "Client added to group: " << targetGroup << std::endl;
             return;
         }
     }
@@ -121,22 +172,22 @@ void join_group(std::vector<Group *> &groupList, std::string targetGroup, single
 
 void send_to_user(clientDetails *client, std::string src_string)
 {
-    std::cout << "Command: Send To Use\n";
+    std::cout << "Command: Send To User\n";
     char delimiter = ' ';
+    size_t spacePos = src_string.find(delimiter);
+    
+    std::string target_username = src_string.substr(0, spacePos);
+    std::string message = src_string.substr(spacePos + 1);
 
-    std::string target_username = src_string.substr(0, src_string.find(' '));
-    std::string message = src_string.substr(src_string.find(' ') + 1, (int)src_string.length() - 1);
-    message += "\0";
-
-    std::cout << "username: " << target_username << ", sends " << message << std::endl;
-
-    for (int i = 0; i < (int)client->clientList.size(); i++)
+    for (size_t i = 0; i < client->clientList.size(); i++)
     {
-        if (client->clientList[i]->username.compare(target_username) == 0)
+        if (client->clientList[i]->username == target_username)
         {
-            send(client->clientList[i]->clientfd, message.c_str(), strlen(message.c_str()), MSG_DONTROUTE);
+            send(client->clientList[i]->clientfd, message.c_str(), message.length(), MSG_DONTROUTE);
+            return;
         }
     }
+    std::cout << "No user with username: " << target_username << " found." << std::endl;
 }
 
 void create_group(clientDetails *client, std::vector<Group *> &groupList, singleClient *current_client, std::string newGroupName)
@@ -145,88 +196,486 @@ void create_group(clientDetails *client, std::vector<Group *> &groupList, single
     newGroup->groupName = newGroupName;
     newGroup->membersList.push_back(current_client);
     newGroup->owner = current_client;
+    newGroup->OperatorList.push_back(current_client);
+    newGroup->currentlySignedIn.push_back(current_client);
+    newGroup->memberCount = 1;  // As the owner is added
     current_client->chatgroupList.push_back(newGroup);
-    groupList.push_back(newGroup); // Ensure this modifies the original vector
+    groupList.push_back(newGroup);
 }
 
-void print_status(clientDetails *clientInfo)
+void add_to_group(clientDetails *clientInfo, std::vector<Group *> &groupList, const std::string &src_string, singleClient *current_client)
 {
-    std::cout << "/*-------------------*/\n";
-    std::cout << "/*-     status      -*/\n";
-    std::cout << "/*-------------------*/\n";
-    std::cout << "Clientfd: " << clientInfo->clientfd << std::endl;
-    std::cout << "Serverfd: " << clientInfo->serverfd << std::endl;
-    std::cout << "/*-------------------*/\n";
-    std::cout << "Client List\n";
-    for (auto tempClient : clientInfo->clientList)
+    size_t spacePos = src_string.find(' ');
+    if (spacePos == std::string::npos)
     {
-        if (tempClient->log_in_status == true)
-        {
-            std::cout << "Clientfd: " << tempClient->clientfd << " | username: " << tempClient->username << " | logged in\n";
-
-            std::cout << "Groups joined:\n";
-            for (auto group : tempClient->chatgroupList)
-            {
-                if (group->inviteOnly == true)
-                {
-                    std::cout << " -    " << group->groupName << " | " << group->topic << "| private group";
-                }
-                else
-                {
-                    std::cout << " -    " << group->groupName << " | " << group->topic << "| public group";
-                }
-            }
-        }
-        else
-        {
-            std::cout << "Clientfd: " << tempClient->clientfd << " | username: " << tempClient->username << " | logged out\n";
-            std::cout << "Groups joined:\n";
-            for (auto group : tempClient->chatgroupList)
-            {
-                if (group->inviteOnly == true)
-                {
-                    std::cout << " -    " << group->groupName << " | " << group->topic << "| private group";
-                }
-                else
-                {
-                    std::cout << " -    " << group->groupName << " | " << group->topic << "| public group";
-                }
-            }
-        }
+        std::cerr << "Invalid input format for Add to Group\n";
+        return;
     }
-}
 
-void add_to_group(clientDetails *clientInfo, std::vector<Group *> &groupList, std::string src_string, singleClient current_client)
-{
-    std::string GroupName = src_string.substr(0, src_string.find(' '));
-    std::string newUser = src_string.substr(src_string.find(' ') + 1, src_string.length() - 1);
+    std::string GroupName = src_string.substr(0, spacePos);
+    std::string newUser = src_string.substr(spacePos + 1);
 
-    for (int i = 0; i < (int)clientInfo->clientList.size(); i++)
+    for (size_t i = 0; i < clientInfo->clientList.size(); ++i)
     {
         if (clientInfo->clientList[i]->username == newUser)
         {
-            std::cout << "client exist\n";
-            for (int j = 0; j < (int)groupList.size(); j++)
-            {
-                if (groupList[j]->groupName == GroupName)
-                {
-                    std::cout << "group exists\n";
-                    clientInfo->clientList[i]->chatgroupList.push_back(groupList[j]);
-                    groupList[j]->membersList.push_back(clientInfo->clientList[i]);
-                    std::string result = "Added " + newUser + " to " + GroupName;
-                    send(clientInfo->clientfd, result.c_str(), strlen(result.c_str()), MSG_DONTROUTE);
+            std::cout << "Client exists: " << newUser << std::endl;
 
+            for (size_t j = 0; j < groupList.size(); ++j)
+            {
+                Group *group = groupList[j];
+                if (group->groupName == GroupName)
+                {
+                    bool isOperator = false;
+                    for (size_t k = 0; k < group->OperatorList.size(); ++k)
+                    {
+                        if (group->OperatorList[k] == current_client)
+                        {
+                            isOperator = true;
+                            break;
+                        }
+                    }
+
+                    if (!isOperator)
+                    {
+                        std::cout << "Current client is not an operator in the group." << std::endl;
+                        std::string buffer = "You must be an operator to add members to the group: " + GroupName + ".\n";
+                        send(clientInfo->clientfd, buffer.c_str(), buffer.length(), MSG_DONTROUTE);
+                        return;
+                    }
+
+                    if (group->member_limit_on && group->memberCount >= group->memberLimit)
+                    {
+                        std::cout << "Group member limit reached." << std::endl;
+                        std::string buffer = "Cannot add " + newUser + " to " + GroupName + ": Member limit reached.\n";
+                        send(clientInfo->clientfd, buffer.c_str(), buffer.length(), MSG_DONTROUTE);
+                        return;
+                    }
+
+                    clientInfo->clientList[i]->chatgroupList.push_back(group);
+                    group->membersList.push_back(clientInfo->clientList[i]);
+                    group->memberCount++;
+
+                    std::string result = "Added " + newUser + " to " + GroupName + ".\n";
+                    send(clientInfo->clientfd, result.c_str(), result.length(), MSG_DONTROUTE);
                     return;
                 }
             }
-            std::cout << "Group: " << GroupName << " does not exist\n";
+            std::cout << "Group: " << GroupName << " does not exist." << std::endl;
         }
     }
-    std::cout << "new Member: " << newUser << " does not exist\n";
+    std::cout << "New member: " << newUser << " does not exist." << std::endl;
 
-    std::string buffer = "Failed to add" + newUser + " to " + GroupName + ". Try again\n";
-    std::cout << "buffer: " << buffer << std::endl;
-    send(clientInfo->clientfd, buffer.c_str(), strlen(buffer.c_str()), MSG_DONTROUTE);
+    std::string buffer = "Failed to add " + newUser + " to " + GroupName + ". Try again.\n";
+    send(clientInfo->clientfd, buffer.c_str(), buffer.length(), MSG_DONTROUTE);
+}
+
+void kick_from_group(clientDetails *clientInfo, std::vector<Group *> &groupList, const std::string &src_string, singleClient *current_client)
+{
+    size_t spacePos = src_string.find(' ');
+    if (spacePos == std::string::npos)
+    {
+        std::cerr << "Invalid input format for Kick From Group\n";
+        return;
+    }
+
+    std::string GroupName = src_string.substr(0, spacePos);
+    std::string targetUser = src_string.substr(spacePos + 1);
+
+    for (size_t j = 0; j < groupList.size(); ++j)
+    {
+        Group *group = groupList[j];
+
+        if (group->groupName == GroupName)
+        {
+            std::cout << "Group exists: " << GroupName << std::endl;
+
+            bool isOperator = false;
+            for (size_t k = 0; k < group->OperatorList.size(); ++k)
+            {
+                if (group->OperatorList[k] == current_client)
+                {
+                    isOperator = true;
+                    break;
+                }
+            }
+
+            if (!isOperator)
+            {
+                std::cout << "Current client is not an operator in the group." << std::endl;
+                std::string buffer = "You must be an operator to kick members from the group: " + GroupName + ".\n";
+                send(clientInfo->clientfd, buffer.c_str(), buffer.length(), MSG_DONTROUTE);
+                return;
+            }
+
+            for (size_t i = 0; i < group->membersList.size(); ++i)
+            {
+                if (group->membersList[i]->username == targetUser)
+                {
+                    std::cout << "Found user: " << targetUser << std::endl;
+
+                    group->membersList.erase(group->membersList.begin() + i);
+                    group->memberCount--;
+
+                    std::string result = targetUser + " removed from " + GroupName + "\n";
+                    send(clientInfo->clientfd, result.c_str(), result.length(), MSG_DONTROUTE);
+                    return;
+                }
+            }
+
+            std::cout << "User " << targetUser << " not found in group " << GroupName << std::endl;
+            break;
+        }
+    }
+
+    std::string buffer = "Failed to remove " + targetUser + " from " + GroupName + ". Try again.\n";
+    std::cout << "Buffer: " << buffer << std::endl;
+    send(clientInfo->clientfd, buffer.c_str(), buffer.length(), MSG_DONTROUTE);
+}
+
+bool isClientValidForGroup(std::vector<Group *> &groupList, singleClient *current_client, const std::string &groupName)
+{
+    // Iterate over the groupList to find the corresponding group
+    for (int j = 0; j < (int)groupList.size(); j++)
+    {
+        if (groupList[j]->groupName == groupName)
+        {
+            // Check if the client is logged in and part of the group
+            bool isLoggedIn = current_client->log_in_status;
+            bool isPartOfGroup = std::find(groupList[j]->currentlySignedIn.begin(), groupList[j]->currentlySignedIn.end(), current_client) != groupList[j]->currentlySignedIn.end();
+
+            if (!isLoggedIn || !isPartOfGroup)
+            {
+                std::cerr << "Client is not logged in or not part of the group.\n";
+                return false;
+            }
+
+            // Check for password protection if enabled
+            if (groupList[j]->password_on && groupList[j]->password != "")
+            {
+                // Prompt for password (this part depends on your system of handling password input)
+                std::string enteredPassword;
+                std::cout << "Enter password for group " << groupName << ": ";
+                std::cin >> enteredPassword;
+
+                if (enteredPassword != groupList[j]->password)
+                {
+                    std::cerr << "Incorrect password.\n";
+                    return false;
+                }
+            }
+
+            // Client is valid for the group
+            return true;
+        }
+    }
+
+    std::cerr << "Group not found.\n";
+    return false;
+}
+
+void remove_operator_privilege(clientDetails *clientInfo, std::vector<Group *> &groupList, std::string src_string, singleClient current_client)
+{
+    size_t spacePos = src_string.find(' ');
+    if (spacePos == std::string::npos)
+    {
+        std::cerr << "Invalid input format for Remove Operator Privilege\n";
+        return;
+    }
+    std::string GroupName = src_string.substr(0, spacePos);
+    std::string targetUser = src_string.substr(spacePos + 1);
+
+    for (int j = 0; j < (int)groupList.size(); j++)
+    {
+        if (groupList[j]->groupName == GroupName)
+        {
+            bool isOperator = false;
+            for (int i = 0; i < (int)groupList[j]->OperatorList.size(); i++)
+            {
+                if (groupList[j]->OperatorList[i]->clientId == current_client.clientId)
+                {
+                    isOperator = true;
+                    break;
+                }
+            }
+
+            if (isOperator)
+            {
+                std::cout << "group exists\n";
+                for (int i = 0; i < (int)groupList[j]->OperatorList.size(); i++)
+                {
+                    if (groupList[j]->OperatorList[i]->username == targetUser)
+                    {
+                        std::cout << "found user\n";
+                        for (int a = i; a < (int)groupList[j]->OperatorList.size() - 1; ++a)
+                        {
+                            groupList[j]->OperatorList[a] = groupList[j]->OperatorList[a + 1];
+                        }
+                        groupList[j]->OperatorList.pop_back();
+                        std::string result = targetUser + " removed from " + GroupName + "'s privilege\n";
+                        std::cout << result;
+                        return;
+                    }
+                }
+                std::cout << targetUser << " not found in operator list.\n";
+            }
+            else
+            {
+                std::cout << "You do not have permission to remove operator privileges.\n";
+            }
+        }
+    }
+}
+
+void set_remove_invite_only(clientDetails *clientInfo, std::vector<Group *> &groupList, std::string src_string, singleClient current_client)
+{
+    size_t spacePos = src_string.find(' ');
+    if (spacePos == std::string::npos)
+    {
+        std::cerr << "Invalid input format for Set/Remove Invite Only\n";
+        return;
+    }
+    std::string GroupName = src_string.substr(0, spacePos);
+    std::string set = src_string.substr(spacePos + 1);
+
+    for (int j = 0; j < (int)groupList.size(); j++)
+    {
+        if (groupList[j]->groupName == GroupName)
+        {
+            bool isOperator = false;
+            for (int i = 0; i < (int)groupList[j]->OperatorList.size(); i++)
+            {
+                if (groupList[j]->OperatorList[i]->clientId == current_client.clientId)
+                {
+                    isOperator = true;
+                    break;
+                }
+            }
+
+            if (isOperator)
+            {
+                std::cout << "group exists\n";
+                if (set == "set")
+                    groupList[j]->inviteOnly = true;
+                else if (set == "remove")
+                    groupList[j]->inviteOnly = false;
+            }
+            else
+            {
+                std::cout << "You do not have permission to change invite-only setting.\n";
+            }
+        }
+    }
+}
+
+void set_channel_password(clientDetails *clientInfo, std::vector<Group *> &groupList, std::string src_string, singleClient current_client)
+{
+    std::istringstream stream(src_string);
+
+    // Variables to hold the parsed words
+    std::string GroupName, set, newPassword;
+
+    // Extract words from the stream
+    stream >> GroupName >> set >> newPassword;
+
+    for (int j = 0; j < (int)groupList.size(); j++)
+    {
+        if (groupList[j]->groupName == GroupName)
+        {
+            bool isOperator = false;
+            for (int i = 0; i < (int)groupList[j]->OperatorList.size(); i++)
+            {
+                if (groupList[j]->OperatorList[i]->clientId == current_client.clientId)
+                {
+                    isOperator = true;
+                    break;
+                }
+            }
+
+            if (isOperator)
+            {
+                std::cout << "group exists\n";
+                if (set == "set")
+                {
+                    groupList[j]->password_on = true;
+                    groupList[j]->password = newPassword;
+                }
+                else if (set == "remove")
+                {
+                    groupList[j]->password_on = false;
+                    groupList[j]->password = "";
+                }
+            }
+            else
+            {
+                std::cout << "You do not have permission to set or remove the channel password.\n";
+            }
+        }
+    }
+}
+
+void set_user_limit(clientDetails *clientInfo, std::vector<Group *> &groupList, std::string src_string, singleClient current_client)
+{
+    std::istringstream stream(src_string);
+
+    // Variables to hold the parsed words
+    std::string GroupName, limit_bool, str_number;
+
+    // Extract words from the stream
+    stream >> GroupName >> limit_bool >> str_number;
+
+    for (int j = 0; j < (int)groupList.size(); j++)
+    {
+        if (groupList[j]->groupName == GroupName)
+        {
+            bool isOperator = false;
+            for (int i = 0; i < (int)groupList[j]->OperatorList.size(); i++)
+            {
+                if (groupList[j]->OperatorList[i]->clientId == current_client.clientId)
+                {
+                    isOperator = true;
+                    break;
+                }
+            }
+
+            if (isOperator)
+            {
+                std::cout << "group exists\n";
+                if (limit_bool == "set")
+                {
+                    groupList[j]->member_limit_on = true;
+                    groupList[j]->memberCount = stoi(str_number);
+                }
+                else if (limit_bool == "remove")
+                {
+                    groupList[j]->member_limit_on = false;
+                    groupList[j]->memberCount = 2147483647;
+                }
+            }
+            else
+            {
+                std::cout << "You do not have permission to change user limit.\n";
+            }
+        }
+    }
+}
+
+void set_remove_topic(clientDetails *clientInfo, std::vector<Group *> &groupList, std::string src_string, singleClient current_client)
+{
+    std::istringstream stream(src_string);
+
+    // Variables to hold the parsed words
+    std::string GroupName, topic_bool, str_topic;
+
+    // Extract words from the stream
+    stream >> GroupName >> topic_bool >> str_topic;
+
+    for (int j = 0; j < (int)groupList.size(); j++)
+    {
+        if (groupList[j]->groupName == GroupName)
+        {
+            bool isOperator = false;
+            for (int i = 0; i < (int)groupList[j]->OperatorList.size(); i++)
+            {
+                if (groupList[j]->OperatorList[i]->clientId == current_client.clientId)
+                {
+                    isOperator = true;
+                    break;
+                }
+            }
+
+            if (isOperator)
+            {
+                std::cout << "group exists\n";
+                if (topic_bool == "set")
+                {
+                    groupList[j]->topic_bool = true;
+                    groupList[j]->topic = str_topic;
+                }
+                else if (topic_bool == "remove")
+                {
+                    groupList[j]->topic_bool = false;
+                    groupList[j]->topic = "";
+                }
+            }
+            else
+            {
+                std::cout << "You do not have permission to change the topic.\n";
+            }
+        }
+    }
+}
+
+void login_to_group(clientDetails *clientInfo, std::vector<Group *> &groupList, std::string src_string, singleClient current_client)
+{
+    std::istringstream stream(src_string);
+
+    // Variables to hold the parsed words
+    std::string GroupName, password_guess;
+
+    // Extract words from the stream
+    stream >> GroupName >> password_guess;
+
+    for (int j = 0; j < (int)groupList.size(); j++)
+    {
+        if (groupList[j]->groupName == GroupName)
+        {
+            if (groupList[j]->password_on == false)
+            {
+                groupList[j]->currentlySignedIn.push_back(&current_client);
+            }
+            else
+            {
+                if (groupList[j]->password == password_guess)
+                    groupList[j]->currentlySignedIn.push_back(&current_client);
+                else
+                    std::cout << "failed to login\n";
+            }
+        }
+    }
+}
+
+void change_group_topic(clientDetails *clientInfo, std::vector<Group *> &groupList, std::string src_string, singleClient current_client)
+{
+    size_t spacePos = src_string.find(' ');
+    if (spacePos == std::string::npos)
+    {
+        std::cerr << "Invalid input format for Change Group Topic\n";
+        return;
+    }
+    std::string GroupName = src_string.substr(0, spacePos);
+    std::string newTopic = src_string.substr(spacePos + 1);
+
+    // Loop through the group list to find the group
+    for (int j = 0; j < (int)groupList.size(); j++)
+    {
+        if (groupList[j]->groupName == GroupName)
+        {
+            // Check if the current client is in the operator list
+            bool isOperator = false;
+            for (int i = 0; i < (int)groupList[j]->OperatorList.size(); i++)
+            {
+                if (groupList[j]->OperatorList[i]->clientId == current_client.clientId)
+                {
+                    isOperator = true;
+                    break;
+                }
+            }
+
+            if (isOperator)
+            {
+                std::cout << "Group exists, and " << current_client.username << " is an operator\n";
+                groupList[j]->topic = newTopic; // Change the group topic
+                std::cout << "Topic changed to: " << newTopic << std::endl;
+            }
+            else
+            {
+                std::cout << "You do not have permission to change the topic. Only operators can change the topic.\n";
+            }
+            return;
+        }
+    }
+    std::cout << "Group: " << GroupName << " does not exist\n";
 }
 
 int main()
@@ -296,10 +745,10 @@ int main()
         maxfd = clientInfo->serverfd;
         // copying the client list to readfds
         // so that we can listen to all the client
-        for (auto currentClient : clientInfo->clientList)
+        for (int i = 0; i < (int)clientInfo->clientList.size(); i++)
         {
 
-            int32_t sd = currentClient->clientfd;
+            int32_t sd = clientInfo->clientList[i]->clientfd;
             FD_SET(sd, &readfds);
             if (sd > maxfd)
             {
@@ -390,7 +839,7 @@ int main()
 
                 char temp_message[1024];
 
-                if (message_len > 2)
+                if (message_len > 1)
                 {
                     strcpy(temp_message, message);
                     temp_message[message_len - 1] = '\0';
@@ -438,7 +887,7 @@ int main()
                             }
                             else if (temp.compare(0, 6, "STATUS") == 0)
                             {
-                                print_status(clientInfo);
+                                print_status(*clientInfo);
                             }
                             else if (temp.compare(0, 12, "Send To User") == 0)
                             {
@@ -448,18 +897,93 @@ int main()
                             {
                                 create_group(clientInfo, groupList, current_client, temp.substr(13, temp.length()));
                             }
+                            else if (temp.compare(0, 14, "Login To Group") == 0)
+                            {
+                                login_to_group(clientInfo, groupList, temp.substr(15, (int)temp.length() - 1), *current_client);
+                            }
                             else if (temp.compare(0, 13, "Send To Group") == 0)
                             {
-                                find_and_send_to_group(groupList, temp.substr(14, (int)temp.length() - 1));
+                                // Ensure the client is logged in, and is part of the group (password check if needed)
+                                if (isClientValidForGroup(groupList, current_client, temp.substr(14)))
+                                {
+                                    find_and_send_to_group(groupList, temp.substr(14, (int)temp.length() - 1));
+                                }
                             }
                             else if (temp.compare(0, 10, "Join Group") == 0)
                             {
-                                join_group(groupList, temp.substr(11, (int)temp.length() - 1), current_client);
+                                // Ensure the client is logged in, and is part of the group (password check if needed)
+                                if (isClientValidForGroup(groupList, current_client, temp.substr(11)))
+                                {
+                                    join_group(groupList, temp.substr(11, (int)temp.length() - 1), current_client);
+                                }
                             }
-                            else if (temp.compare(0, 12, "Add To Group") == 0)
+                            else if (temp.compare(0, 6, "INVITE") == 0)
                             {
-                                add_to_group(clientInfo, groupList, temp.substr(13, (int)temp.length() - 1), *current_client);
+                                // Ensure the client is logged in, and is part of the group (password check if needed)
+                                if (isClientValidForGroup(groupList, current_client, temp.substr(7)))
+                                {
+                                    add_to_group(clientInfo, groupList, temp.substr(7, (int)temp.length() - 1), current_client);
+                                }
                             }
+                            else if (temp.compare(0, 4, "KICK") == 0)
+                            {
+                                // Ensure the client is logged in, and is part of the group (password check if needed)
+                                if (isClientValidForGroup(groupList, current_client, temp.substr(5)))
+                                {
+                                    kick_from_group(clientInfo, groupList, temp.substr(5, (int)temp.length() - 1), current_client);
+                                }
+                            }
+                            else if (temp.compare(0, 5, "TOPIC") == 0)
+                            {
+                                // Ensure the client is logged in, and is part of the group (password check if needed)
+                                if (isClientValidForGroup(groupList, current_client, temp.substr(6)))
+                                {
+                                    change_group_topic(clientInfo, groupList, temp.substr(6, (int)temp.length() - 1), *current_client);
+                                }
+                            }
+                            else if (temp.compare(0, 4, "MODE") == 0)
+                            {
+                                std::string new_temp = temp.substr(5, (int)temp.length() - 1);
+                                // Ensure the client is logged in, and is part of the group (password check if needed)
+                                if (isClientValidForGroup(groupList, current_client, new_temp))
+                                {
+                                    if (new_temp[0] == 'i')
+                                    {
+                                        new_temp = new_temp.substr(2, (int)new_temp.length() - 1);
+                                        // set/remove invite only channel
+                                        set_remove_invite_only(clientInfo, groupList, new_temp, *current_client);
+                                    }
+                                    else if (new_temp[0] == 't')
+                                    {
+                                        new_temp = new_temp.substr(2, (int)new_temp.length() - 1);
+                                        // set/remove restrictions of the TOPIC command to channel operator
+                                        set_remove_topic(clientInfo, groupList, new_temp, *current_client);
+                                    }
+                                    else if (new_temp[0] == 'k')
+                                    {
+                                        new_temp = new_temp.substr(2, (int)new_temp.length() - 1);
+                                        // set/remove channel key/password
+                                        set_channel_password(clientInfo, groupList, new_temp, *current_client);
+                                    }
+                                    else if (new_temp[0] == 'o')
+                                    {
+                                        new_temp = new_temp.substr(2, (int)new_temp.length() - 1);
+                                        // give/take channel operator privilege
+                                        remove_operator_privilege(clientInfo, groupList, new_temp, *current_client);
+                                    }
+                                    else if (new_temp[0] == 'l')
+                                    {
+                                        new_temp = new_temp.substr(2, (int)new_temp.length() - 1);
+                                        // set/remove the user limit to channel
+                                        set_user_limit(clientInfo, groupList, new_temp, *current_client);
+                                    }
+                                }
+                            }
+                            else
+                            {
+                                std::cout << "message: " << temp_message << std::endl;
+                            }
+
                             /*
                              * handle the message in new thread
                              * so that we can listen to other client
@@ -470,10 +994,6 @@ int main()
                              */
                         }
                     }
-                }
-                else
-                {
-                    std::cout << "message: " << temp_message << " invalide\n";
                 }
             }
         }
